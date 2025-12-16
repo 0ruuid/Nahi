@@ -36,20 +36,6 @@ subprojects {
             taboolib = "6.2.4-abd325ee"
         }
 
-        description {
-            name(rootProject.name)
-            prefix(rootProject.name)
-            contributors {
-                name("HiUsers")
-            }
-            links {
-                name("homepage").url("https://iplugin.hiusers.com/")
-            }
-            dependencies {
-                // name("Adyeshach").optional(true)
-            }
-        }
-
         relocate("top.maplex.arim", "${rootProject.group}.libs.arim")
         relocate("com.zaxxer.hikari", "${rootProject.group}.libs.hikari")
         // relocate("com.github.benmanes.caffeine", "${rootProject.group}.libs.caffeine")
