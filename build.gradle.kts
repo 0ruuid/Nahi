@@ -5,7 +5,7 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 plugins {
     java
-    id("io.izzel.taboolib") version "2.0.27"
+    id("io.izzel.taboolib") version "2.0.36"
     id("com.github.johnrengelman.shadow") version "8.1.1" apply false
     kotlin("jvm") version "2.1.0"
 }
@@ -33,7 +33,7 @@ subprojects {
             )
         }
         version {
-            taboolib = "6.2.4-abd325ee"
+            taboolib = "6.3.0-b0ee24a"
         }
 
         relocate("top.maplex.arim", "${rootProject.group}.libs.arim")
