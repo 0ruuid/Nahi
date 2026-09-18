@@ -1,0 +1,141 @@
+name: Update TabooLib
+
+on:
+  schedule:
+    # 避开整点；GitHub 的定时工作流可能在高负载时延迟执行。
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: taboolib-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Check and update TabooLib
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Read the latest official TabooLib release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          release="$(gh api repos/TabooLib/taboolib/releases/latest --jq '[.tag_name, .html_url] | @tsv')"
+          IFS=$'\t' read -r latest_version release_url <<< "$release"
+
+          # TabooLib 的构建版本包含 commit hash，不能按语义版本或字符串大小推断新旧。
+          # 始终使用 GitHub 标记为 latest 的正式 Release，并拒绝格式异常的结果。
+          if [[ ! "$latest_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{7,}$ ]]; then
+            echo "::error::Unexpected TabooLib release tag: $latest_version"
+            exit 1
+          fi
+
+          mapfile -t configured_versions < <(
+            sed -nE 's/^[[:space:]]*taboolib[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' build.gradle.kts
+          )
+          if [[ "${#configured_versions[@]}" -ne 1 ]]; then
+            echo "::error::Expected exactly one TabooLib build version in build.gradle.kts"
+            exit 1
+          fi
+
+          current_version="${configured_versions[0]}"
+          echo "current_version=$current_version" >> "$GITHUB_OUTPUT"
+          echo "latest_version=$latest_version" >> "$GITHUB_OUTPUT"
+          echo "release_url=$release_url" >> "$GITHUB_OUTPUT"
+
+          if [[ "$current_version" == "$latest_version" ]]; then
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+            echo "TabooLib is already at $current_version."
+          else
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+            echo "TabooLib will be updated from $current_version to $latest_version."
+          fi
+
+      - name: Check for an existing update pull request
+        id: existing-pr
+        if: steps.release.outputs.needs_update == 'true'
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          TABOOLIB_VERSION: ${{ steps.release.outputs.latest_version }}
+        run: |
+          set -euo pipefail
+
+          branch="automation/taboolib-${TABOOLIB_VERSION}"
+          pr_url="$(gh pr list --base "$DEFAULT_BRANCH" --head "$branch" --state open --json url --jq '.[0].url // empty')"
+
+          if [[ -n "$pr_url" ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "url=$pr_url" >> "$GITHUB_OUTPUT"
+            echo "An update pull request is already open: $pr_url"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update the configured TabooLib build version
+        if: steps.release.outputs.needs_update == 'true' && steps.existing-pr.outputs.exists != 'true'
+        env:
+          TABOOLIB_VERSION: ${{ steps.release.outputs.latest_version }}
+        run: |
+          set -euo pipefail
+
+          sed -i -E "s|^([[:space:]]*taboolib[[:space:]]*=[[:space:]]*)\"[^\"]+\"|\1\"${TABOOLIB_VERSION}\"|" build.gradle.kts
+          git diff --check
+
+          if git diff --quiet -- build.gradle.kts; then
+            echo "::error::TabooLib version replacement made no change"
+            exit 1
+          fi
+
+      - name: Build with the updated TabooLib version
+        if: steps.release.outputs.needs_update == 'true' && steps.existing-pr.outputs.exists != 'true'
+        run: ./gradlew --no-daemon build
+
+      - name: Create the update pull request
+        if: steps.release.outputs.needs_update == 'true' && steps.existing-pr.outputs.exists != 'true'
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_URL: ${{ steps.release.outputs.release_url }}
+          TABOOLIB_VERSION: ${{ steps.release.outputs.latest_version }}
+        run: |
+          set -euo pipefail
+
+          branch="automation/taboolib-${TABOOLIB_VERSION}"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "::error::The reserved branch $branch already exists without an open pull request; inspect it before retrying."
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --create "$branch"
+          git add build.gradle.kts
+          git commit -m "build(deps): 升级 TabooLib 至 ${TABOOLIB_VERSION}"
+          git push --set-upstream origin "$branch"
+
+          gh pr create \
+            --base "$DEFAULT_BRANCH" \
+            --head "$branch" \
+            --title "build(deps): 升级 TabooLib 至 ${TABOOLIB_VERSION}" \
+            --body $'## Summary\n\n- Updated TabooLib build version to `'"$TABOOLIB_VERSION"$'`.\n- Upstream release: '"$RELEASE_URL"$'\n\n## Validation\n\n- `./gradlew --no-daemon build`'
