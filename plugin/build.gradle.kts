@@ -5,6 +5,12 @@ plugins {
     id("com.hiusers.klos") version "0.0.2"
 }
 
+val packagedProjects = rootProject.subprojects.filter { it.path.startsWith(":project:") }
+
+// TabooLib 2.0.38 在打包时会解析 `taboo` 中的 ProjectDependency。
+// 先完成这些子项目的配置，避免在 plugin 的 afterEvaluate 阶段延迟配置它们。
+packagedProjects.forEach { evaluationDependsOn(it.path) }
+
 taboolib {
     description {
         name(rootProject.name)
@@ -24,7 +30,7 @@ taboolib {
 }
 
 dependencies {
-    rootProject.subprojects.filter { it.path.startsWith(":project:") }.forEach {
+    packagedProjects.forEach {
         taboo(project(it.path)) { isTransitive = false }
     }
 
@@ -40,7 +46,7 @@ tasks {
         // 添加 classifier 避免与 shadowJar 文件名冲突
         archiveClassifier.set("original")
         // 打包子项目输出
-        rootProject.subprojects.filter { it.path.startsWith(":project:") }.forEach {
+        packagedProjects.forEach {
             from(it.sourceSets["main"].output)
         }
     }
@@ -51,7 +57,7 @@ tasks {
         archiveClassifier.set("sources")
         
         // 打包子项目源代码
-        rootProject.subprojects.filter { it.path.startsWith(":project:") }.forEach { subproject ->
+        packagedProjects.forEach { subproject ->
             val sourceSets = subproject.extensions.findByType<SourceSetContainer>()
             sourceSets?.findByName("main")?.let { mainSourceSet ->
                 from(mainSourceSet.allSource)

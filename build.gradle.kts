@@ -5,7 +5,7 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 plugins {
     java
-    id("io.izzel.taboolib") version "2.0.36"
+    id("io.izzel.taboolib") version "2.0.38"
     id("com.github.johnrengelman.shadow") version "8.1.1" apply false
     kotlin("jvm") version "2.1.0"
 }
@@ -13,6 +13,13 @@ plugins {
 // val exposedVersion: String by project
 
 subprojects {
+    // `:project` 仅用于聚合子模块，不参与编译或打包。
+    // TabooLib 2.0.38 会在打包阶段解析项目依赖；将插件应用到该聚合项目会触发
+    // Gradle 的 afterEvaluate 时序冲突。
+    if (path == ":project") {
+        return@subprojects
+    }
+
     apply<JavaPlugin>()
     apply(plugin = "io.izzel.taboolib")
     apply(plugin = "org.jetbrains.kotlin.jvm")
@@ -33,7 +40,7 @@ subprojects {
             )
         }
         version {
-            taboolib = "6.3.0-b0ee24a"
+            taboolib = "6.3.0-afd75a7"
         }
 
         relocate("top.maplex.arim", "${rootProject.group}.libs.arim")
