@@ -40,7 +40,7 @@ subprojects {
             )
         }
         version {
-            taboolib = "6.3.0-afd75a7"
+            taboolib = "6.3.0-0e3a911"
         }
 
         relocate("top.maplex.arim", "${rootProject.group}.libs.arim")
