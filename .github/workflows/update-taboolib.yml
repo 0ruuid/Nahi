@@ -33,51 +33,56 @@ jobs:
           java-version: "21"
           cache: gradle
 
-      - name: Read the latest official TabooLib release
-        id: release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Read the latest published TabooLib commit build
+        id: taboolib
+        shell: python
         run: |
-          set -euo pipefail
+          import os
+          import re
+          import urllib.request
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
 
-          release="$(gh api repos/TabooLib/taboolib/releases/latest --jq '[.tag_name, .html_url] | @tsv')"
-          IFS=$'\t' read -r latest_version release_url <<< "$release"
+          metadata_url = "https://repo.tabooproject.org/repository/releases/io/izzel/taboolib/common/maven-metadata.xml"
+          with urllib.request.urlopen(metadata_url, timeout=30) as response:
+              metadata = ET.parse(response)
 
-          # TabooLib 的构建版本包含 commit hash，不能按语义版本或字符串大小推断新旧。
-          # 始终使用 GitHub 标记为 latest 的正式 Release，并拒绝格式异常的结果。
-          if [[ ! "$latest_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{7,}$ ]]; then
-            echo "::error::Unexpected TabooLib release tag: $latest_version"
-            exit 1
-          fi
+          # 按 Maven 元数据中的发布顺序选择 commit 构件，不按 hash 排序。
+          # 不使用 <latest>/<release>，它们可能指向 test/dev 版本。
+          versions = [
+              node.text for node in metadata.findall("./versioning/versions/version")
+              if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{7,40}", node.text or "")
+          ]
+          if not versions:
+              raise SystemExit("::error::No published TabooLib commit build found in Maven metadata")
+          latest_version = versions[-1]
 
-          mapfile -t configured_versions < <(
-            sed -nE 's/^[[:space:]]*taboolib[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' build.gradle.kts
+          configured_versions = re.findall(
+              r'^\s*taboolib\s*=\s*"([^"\r\n]+)"',
+              Path("build.gradle.kts").read_text(encoding="utf-8"),
+              re.MULTILINE,
           )
-          if [[ "${#configured_versions[@]}" -ne 1 ]]; then
-            echo "::error::Expected exactly one TabooLib build version in build.gradle.kts"
-            exit 1
-          fi
+          if len(configured_versions) != 1:
+              raise SystemExit("::error::Expected exactly one TabooLib build version in build.gradle.kts")
 
-          current_version="${configured_versions[0]}"
-          echo "current_version=$current_version" >> "$GITHUB_OUTPUT"
-          echo "latest_version=$latest_version" >> "$GITHUB_OUTPUT"
-          echo "release_url=$release_url" >> "$GITHUB_OUTPUT"
+          current_version = configured_versions[0]
+          commit_url = f"https://github.com/TabooLib/taboolib/commit/{latest_version.rsplit('-', 1)[1]}"
+          needs_update = str(current_version != latest_version).lower()
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"current_version={current_version}\n")
+              output.write(f"latest_version={latest_version}\n")
+              output.write(f"commit_url={commit_url}\n")
+              output.write(f"needs_update={needs_update}\n")
 
-          if [[ "$current_version" == "$latest_version" ]]; then
-            echo "needs_update=false" >> "$GITHUB_OUTPUT"
-            echo "TabooLib is already at $current_version."
-          else
-            echo "needs_update=true" >> "$GITHUB_OUTPUT"
-            echo "TabooLib will be updated from $current_version to $latest_version."
-          fi
+          print(f"TabooLib: {current_version} -> {latest_version} (needs_update={needs_update})")
 
       - name: Check for an existing update pull request
         id: existing-pr
-        if: steps.release.outputs.needs_update == 'true'
+        if: steps.taboolib.outputs.needs_update == 'true'
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ github.token }}
-          TABOOLIB_VERSION: ${{ steps.release.outputs.latest_version }}
+          TABOOLIB_VERSION: ${{ steps.taboolib.outputs.latest_version }}
         run: |
           set -euo pipefail
 
@@ -93,9 +98,9 @@ jobs:
           fi
 
       - name: Update the configured TabooLib build version
-        if: steps.release.outputs.needs_update == 'true' && steps.existing-pr.outputs.exists != 'true'
+        if: steps.taboolib.outputs.needs_update == 'true' && steps.existing-pr.outputs.exists != 'true'
         env:
-          TABOOLIB_VERSION: ${{ steps.release.outputs.latest_version }}
+          TABOOLIB_VERSION: ${{ steps.taboolib.outputs.latest_version }}
         run: |
           set -euo pipefail
 
@@ -108,16 +113,16 @@ jobs:
           fi
 
       - name: Build with the updated TabooLib version
-        if: steps.release.outputs.needs_update == 'true' && steps.existing-pr.outputs.exists != 'true'
+        if: steps.taboolib.outputs.needs_update == 'true' && steps.existing-pr.outputs.exists != 'true'
         run: ./gradlew --no-daemon build
 
       - name: Create the update pull request
-        if: steps.release.outputs.needs_update == 'true' && steps.existing-pr.outputs.exists != 'true'
+        if: steps.taboolib.outputs.needs_update == 'true' && steps.existing-pr.outputs.exists != 'true'
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ github.token }}
-          RELEASE_URL: ${{ steps.release.outputs.release_url }}
-          TABOOLIB_VERSION: ${{ steps.release.outputs.latest_version }}
+          COMMIT_URL: ${{ steps.taboolib.outputs.commit_url }}
+          TABOOLIB_VERSION: ${{ steps.taboolib.outputs.latest_version }}
         run: |
           set -euo pipefail
 
@@ -138,4 +143,4 @@ jobs:
             --base "$DEFAULT_BRANCH" \
             --head "$branch" \
             --title "build(deps): 升级 TabooLib 至 ${TABOOLIB_VERSION}" \
-            --body $'## Summary\n\n- Updated TabooLib build version to `'"$TABOOLIB_VERSION"$'`.\n- Upstream release: '"$RELEASE_URL"$'\n\n## Validation\n\n- `./gradlew --no-daemon build`'
+            --body $'## Summary\n\n- Updated TabooLib build version to `'"$TABOOLIB_VERSION"$'`.\n- Upstream commit: '"$COMMIT_URL"$'\n\n## Validation\n\n- `./gradlew --no-daemon build`'
