@@ -8,7 +8,6 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
 
 concurrency:
   group: taboolib-update
@@ -66,39 +65,16 @@ jobs:
               raise SystemExit("::error::Expected exactly one TabooLib build version in build.gradle.kts")
 
           current_version = configured_versions[0]
-          commit_url = f"https://github.com/TabooLib/taboolib/commit/{latest_version.rsplit('-', 1)[1]}"
           needs_update = str(current_version != latest_version).lower()
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"current_version={current_version}\n")
               output.write(f"latest_version={latest_version}\n")
-              output.write(f"commit_url={commit_url}\n")
               output.write(f"needs_update={needs_update}\n")
 
           print(f"TabooLib: {current_version} -> {latest_version} (needs_update={needs_update})")
 
-      - name: Check for an existing update pull request
-        id: existing-pr
-        if: steps.taboolib.outputs.needs_update == 'true'
-        env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          GH_TOKEN: ${{ github.token }}
-          TABOOLIB_VERSION: ${{ steps.taboolib.outputs.latest_version }}
-        run: |
-          set -euo pipefail
-
-          branch="automation/taboolib-${TABOOLIB_VERSION}"
-          pr_url="$(gh pr list --base "$DEFAULT_BRANCH" --head "$branch" --state open --json url --jq '.[0].url // empty')"
-
-          if [[ -n "$pr_url" ]]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "url=$pr_url" >> "$GITHUB_OUTPUT"
-            echo "An update pull request is already open: $pr_url"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Update the configured TabooLib build version
-        if: steps.taboolib.outputs.needs_update == 'true' && steps.existing-pr.outputs.exists != 'true'
+        if: steps.taboolib.outputs.needs_update == 'true'
         env:
           TABOOLIB_VERSION: ${{ steps.taboolib.outputs.latest_version }}
         run: |
@@ -113,34 +89,20 @@ jobs:
           fi
 
       - name: Build with the updated TabooLib version
-        if: steps.taboolib.outputs.needs_update == 'true' && steps.existing-pr.outputs.exists != 'true'
+        if: steps.taboolib.outputs.needs_update == 'true'
         run: ./gradlew --no-daemon build
 
-      - name: Create the update pull request
-        if: steps.taboolib.outputs.needs_update == 'true' && steps.existing-pr.outputs.exists != 'true'
+      - name: Commit and push the TabooLib update
+        if: steps.taboolib.outputs.needs_update == 'true'
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          GH_TOKEN: ${{ github.token }}
-          COMMIT_URL: ${{ steps.taboolib.outputs.commit_url }}
           TABOOLIB_VERSION: ${{ steps.taboolib.outputs.latest_version }}
         run: |
           set -euo pipefail
 
-          branch="automation/taboolib-${TABOOLIB_VERSION}"
-          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
-            echo "::error::The reserved branch $branch already exists without an open pull request; inspect it before retrying."
-            exit 1
-          fi
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch --create "$branch"
           git add build.gradle.kts
           git commit -m "build(deps): 升级 TabooLib 至 ${TABOOLIB_VERSION}"
-          git push --set-upstream origin "$branch"
-
-          gh pr create \
-            --base "$DEFAULT_BRANCH" \
-            --head "$branch" \
-            --title "build(deps): 升级 TabooLib 至 ${TABOOLIB_VERSION}" \
-            --body $'## Summary\n\n- Updated TabooLib build version to `'"$TABOOLIB_VERSION"$'`.\n- Upstream commit: '"$COMMIT_URL"$'\n\n## Validation\n\n- `./gradlew --no-daemon build`'
+          # 构建期间远端若有新提交，推送失败并留待下次重新验证，绝不强制覆盖。
+          git push origin "HEAD:${DEFAULT_BRANCH}"
